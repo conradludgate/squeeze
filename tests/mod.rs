@@ -31,14 +31,14 @@ enum LimitWrapper {
 }
 #[async_trait]
 impl LimitAlgorithm for LimitWrapper {
-    fn limit(&self) -> u32 {
+    fn init_limit(&self) -> u32 {
         match self {
-            LimitWrapper::Aimd(l) => l.limit(),
+            LimitWrapper::Aimd(l) => l.init_limit(),
         }
     }
-    async fn update(&self, reading: Sample) -> u32 {
+    async fn update(&self, old_limit: u32, reading: Sample) -> u32 {
         match self {
-            LimitWrapper::Aimd(l) => l.update(reading).await,
+            LimitWrapper::Aimd(l) => l.update(old_limit, reading).await,
         }
     }
 }

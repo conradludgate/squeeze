@@ -1,5 +1,3 @@
-use std::sync::atomic::{AtomicU32, Ordering};
-
 use async_trait::async_trait;
 
 use crate::{limits::Sample, Outcome};
@@ -22,7 +20,7 @@ pub struct Aimd {
     increase_by: u32,
     min_utilisation_threshold: f64,
 
-    limit: AtomicU32,
+    initial_limit: u32,
 }
 
 impl Aimd {
@@ -42,7 +40,7 @@ impl Aimd {
             increase_by: Self::DEFAULT_INCREASE,
             min_utilisation_threshold: Self::DEFAULT_INCREASE_MIN_UTILISATION,
 
-            limit: AtomicU32::new(initial_limit),
+            initial_limit,
         }
     }
 
@@ -82,42 +80,33 @@ impl Aimd {
 
 #[async_trait]
 impl LimitAlgorithm for Aimd {
-    fn limit(&self) -> u32 {
-        self.limit.load(Ordering::Acquire)
+    fn init_limit(&self) -> u32 {
+        self.initial_limit
     }
 
-    async fn update(&self, sample: Sample) -> u32 {
+    async fn update(&self, old_limit: u32, sample: Sample) -> u32 {
         use Outcome::*;
         match sample.outcome {
             Success => {
-                self.limit
-                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |limit| {
-                        let utilisation = sample.in_flight as f64 / limit as f64;
+                let utilisation = sample.in_flight as f64 / old_limit as f64;
 
-                        if utilisation > self.min_utilisation_threshold {
-                            let limit = limit + self.increase_by;
-                            Some(limit.clamp(self.min_limit, self.max_limit))
-                        } else {
-                            Some(limit)
-                        }
-                    })
-                    .expect("we always return Some(limit)");
+                if utilisation > self.min_utilisation_threshold {
+                    let limit = old_limit + self.increase_by;
+                    limit.clamp(self.min_limit, self.max_limit)
+                } else {
+                    old_limit
+                }
             }
             Overload => {
-                self.limit
-                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |limit| {
-                        let limit = limit as f32 * self.decrease_factor;
+                let limit = old_limit as f32 * self.decrease_factor;
 
-                        // Floor instead of round, so the limit reduces even with small numbers.
-                        // E.g. round(2 * 0.9) = 2, but floor(2 * 0.9) = 1
-                        let limit = limit.floor() as u32;
+                // Floor instead of round, so the limit reduces even with small numbers.
+                // E.g. round(2 * 0.9) = 2, but floor(2 * 0.9) = 1
+                let limit = limit.floor() as u32;
 
-                        Some(limit.clamp(self.min_limit, self.max_limit))
-                    })
-                    .expect("we always return Some(limit)");
+                limit.clamp(self.min_limit, self.max_limit)
             }
         }
-        self.limit.load(Ordering::SeqCst)
     }
 }
 

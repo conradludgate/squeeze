@@ -83,7 +83,7 @@ where
 {
     /// Create a limiter with a given limit control algorithm.
     pub fn new(limit_algo: T) -> Self {
-        let initial_permits = limit_algo.limit();
+        let initial_permits = limit_algo.init_limit();
         assert!(initial_permits > 0);
         Self {
             limit_algo,
@@ -157,6 +157,7 @@ where
     pub async fn release(&self, token: Token<'_>, outcome: Option<Outcome>) {
         let (new_limit, old_limit) = if let Some(outcome) = outcome {
             let mut state = self.inner.limits.load(Ordering::Acquire);
+            let old_limit = (state >> 32) as u32;
             let in_flight = state as u32;
 
             let sample = Sample {
@@ -165,7 +166,7 @@ where
                 outcome,
             };
 
-            let new_limit = self.limit_algo.update(sample).await;
+            let new_limit = self.limit_algo.update(old_limit, sample).await;
 
             loop {
                 match self.inner.limits.compare_exchange(

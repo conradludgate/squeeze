@@ -79,13 +79,13 @@ where
     L: LimitAlgorithm + Send + Sync,
     S: Aggregator + Send + Sync,
 {
-    fn limit(&self) -> u32 {
-        self.inner.limit()
+    fn init_limit(&self) -> u32 {
+        self.inner.init_limit()
     }
 
-    async fn update(&self, sample: Sample) -> u32 {
+    async fn update(&self, old_limit: u32, sample: Sample) -> u32 {
         if sample.latency < self.min_latency {
-            return self.inner.limit();
+            return old_limit;
         }
 
         let mut window = self.window.lock().await;
@@ -102,9 +102,9 @@ where
             // TODO: the Netflix lib uses 2x min latency, make this configurable?
             window.duration = agg_sample.latency.clamp(self.min_window, self.max_window);
 
-            self.inner.update(agg_sample).await
+            self.inner.update(old_limit, agg_sample).await
         } else {
-            self.inner.limit()
+            old_limit
         }
     }
 }
@@ -125,26 +125,32 @@ mod tests {
             .with_min_window(Duration::ZERO)
             .with_max_window(Duration::ZERO);
 
-        let mut limit = 0;
+        let mut limit = windowed_vegas.init_limit();
 
         for _ in 0..samples {
             limit = windowed_vegas
-                .update(Sample {
-                    in_flight: 1,
-                    latency: Duration::from_millis(10),
-                    outcome: Outcome::Success,
-                })
+                .update(
+                    limit,
+                    Sample {
+                        in_flight: 1,
+                        latency: Duration::from_millis(10),
+                        outcome: Outcome::Success,
+                    },
+                )
                 .await;
         }
         assert_eq!(limit, 10, "first window shouldn't change limit for Vegas");
 
         for _ in 0..samples {
             limit = windowed_vegas
-                .update(Sample {
-                    in_flight: 1,
-                    latency: Duration::from_millis(100),
-                    outcome: Outcome::Overload,
-                })
+                .update(
+                    limit,
+                    Sample {
+                        in_flight: 1,
+                        latency: Duration::from_millis(100),
+                        outcome: Outcome::Overload,
+                    },
+                )
                 .await;
         }
         assert!(limit < 10, "limit should be reduced");

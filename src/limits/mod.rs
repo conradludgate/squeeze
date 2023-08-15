@@ -22,10 +22,10 @@ pub use windowed::Windowed;
 #[async_trait]
 pub trait LimitAlgorithm {
     /// The current limit.
-    fn limit(&self) -> u32;
+    fn init_limit(&self) -> u32;
 
     /// Update the concurrency limit in response to a new job completion.
-    async fn update(&self, sample: Sample) -> u32;
+    async fn update(&self, old_limit: u32, sample: Sample) -> u32;
 }
 
 /// The result of a job (or jobs), including the [Outcome] (loss) and latency (delay).

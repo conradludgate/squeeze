@@ -14,10 +14,10 @@ impl Fixed {
 
 #[async_trait]
 impl LimitAlgorithm for Fixed {
-    fn limit(&self) -> u32 {
+    fn init_limit(&self) -> u32 {
         self.0
     }
-    async fn update(&self, _reading: Sample) -> u32 {
-        self.0
+    async fn update(&self, old_limit: u32, _reading: Sample) -> u32 {
+        old_limit
     }
 }

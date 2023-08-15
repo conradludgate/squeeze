@@ -1,7 +1,4 @@
-use std::{
-    sync::atomic::{AtomicU32, Ordering},
-    time::Duration,
-};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::sync::Mutex;
@@ -33,6 +30,7 @@ use super::{defaults::MIN_SAMPLE_LATENCY, LimitAlgorithm, Sample};
 /// - [Understanding TCP Vegas: Theory and
 /// Practice](https://www.cs.princeton.edu/research/techreps/TR-628-00)
 pub struct Vegas {
+    initial_limit: u32,
     min_limit: u32,
     max_limit: u32,
 
@@ -41,7 +39,6 @@ pub struct Vegas {
     /// Upper queueing threshold, as a function of the current limit.
     beta: Box<dyn (Fn(u32) -> u32) + Send + Sync>,
 
-    limit: AtomicU32,
     inner: Mutex<Inner>,
 }
 
@@ -59,7 +56,7 @@ impl Vegas {
         assert!(initial_limit > 0);
 
         Self {
-            limit: AtomicU32::new(initial_limit),
+            initial_limit,
             min_limit: Self::DEFAULT_MIN_LIMIT,
             max_limit: Self::DEFAULT_MAX_LIMIT,
 
@@ -83,8 +80,8 @@ impl Vegas {
 
 #[async_trait]
 impl LimitAlgorithm for Vegas {
-    fn limit(&self) -> u32 {
-        self.limit.load(Ordering::Acquire)
+    fn init_limit(&self) -> u32 {
+        self.initial_limit
     }
 
     /// Vegas algorithm, generally applied once every RTT:
@@ -129,53 +126,45 @@ impl LimitAlgorithm for Vegas {
     ///   1x => queue_size = 10 * (1 - 0.01 / 0.01)  =   0 (0%)
     /// 0.5x => queue_size = 10 * (1 - 0.01 / 0.005) = -10 (0%)
     /// ```
-    async fn update(&self, sample: Sample) -> u32 {
+    async fn update(&self, old_limit: u32, sample: Sample) -> u32 {
         if sample.latency < MIN_SAMPLE_LATENCY {
-            return self.limit.load(Ordering::Acquire);
+            return old_limit;
         }
 
         let mut inner = self.inner.lock().await;
         if sample.latency < inner.min_latency {
             inner.min_latency = sample.latency;
-            return self.limit.load(Ordering::Acquire);
+            return old_limit;
         }
 
-        let update_limit = |limit: u32| {
-            // TODO: periodically reset min. latency measurement.
+        // TODO: periodically reset min. latency measurement.
 
-            let dt = sample.latency.as_secs_f64();
-            let min_d = inner.min_latency.as_secs_f64();
+        let dt = sample.latency.as_secs_f64();
+        let min_d = inner.min_latency.as_secs_f64();
 
-            let estimated_queued_jobs = (limit as f64 * (1.0 - (min_d / dt))).ceil() as u32;
+        let estimated_queued_jobs = (old_limit as f64 * (1.0 - (min_d / dt))).ceil() as u32;
 
-            let utilisation = sample.in_flight as f64 / limit as f64;
+        let utilisation = sample.in_flight as f64 / old_limit as f64;
 
-            let increment = limit.ilog10().max(1);
+        let increment = old_limit.ilog10().max(1);
 
-            let limit =
-                // Limit too big
-                if sample.outcome == Outcome::Overload || estimated_queued_jobs < (self.alpha)(limit) {
-                    limit - increment
+        let limit =
+            // Limit too big
+            if sample.outcome == Outcome::Overload || estimated_queued_jobs < (self.alpha)(old_limit) {
+                old_limit - increment
 
-                // Limit too small
-                } else if estimated_queued_jobs > (self.beta)(limit)
-                    && utilisation > Self::DEFAULT_INCREASE_MIN_UTILISATION
-                {
-                    // TODO: support some kind of fast start, e.g. increase by beta when almost no queueing
-                    limit + increment
+            // Limit too small
+            } else if estimated_queued_jobs > (self.beta)(old_limit)
+                && utilisation > Self::DEFAULT_INCREASE_MIN_UTILISATION
+            {
+                // TODO: support some kind of fast start, e.g. increase by beta when almost no queueing
+                old_limit + increment
 
-                // Perfect porridge
-                } else {
-                    limit
-                };
+            // Perfect porridge
+            } else {
+                old_limit
+            };
 
-            Some(limit.clamp(self.min_limit, self.max_limit))
-        };
-
-        self.limit
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, update_limit)
-            .expect("we always return Some(limit)");
-
-        self.limit.load(Ordering::SeqCst)
+        limit.clamp(self.min_limit, self.max_limit)
     }
 }
