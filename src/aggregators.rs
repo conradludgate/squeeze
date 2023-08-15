@@ -15,6 +15,7 @@ pub trait Aggregator {
 }
 
 /// Average latency.
+#[derive(Clone, Copy)]
 pub struct Average {
     latency_sum: Duration,
     max_in_flight: u32,
@@ -23,6 +24,7 @@ pub struct Average {
 }
 
 /// A latency percentile.
+#[derive(Clone)]
 pub struct Percentile {
     percentile: f64,
     max_in_flight: u32,

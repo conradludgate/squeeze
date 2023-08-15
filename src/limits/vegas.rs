@@ -1,7 +1,6 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use tokio::sync::Mutex;
 
 use crate::Outcome;
 
@@ -29,20 +28,15 @@ use super::{defaults::MIN_SAMPLE_LATENCY, LimitAlgorithm, Sample};
 ///   Internet](https://www.cs.princeton.edu/courses/archive/fall06/cos561/papers/vegas.pdf)
 /// - [Understanding TCP Vegas: Theory and
 /// Practice](https://www.cs.princeton.edu/research/techreps/TR-628-00)
+#[derive(Clone)]
 pub struct Vegas {
-    initial_limit: u32,
     min_limit: u32,
     max_limit: u32,
 
-    /// Lower queueing threshold, as a function of the current limit.
-    alpha: Box<dyn (Fn(u32) -> u32) + Send + Sync>,
-    /// Upper queueing threshold, as a function of the current limit.
-    beta: Box<dyn (Fn(u32) -> u32) + Send + Sync>,
-
-    inner: Mutex<Inner>,
-}
-
-struct Inner {
+    // /// Lower queueing threshold, as a function of the current limit.
+    // alpha: Box<dyn (Fn(u32) -> u32) + Send + Sync>,
+    // /// Upper queueing threshold, as a function of the current limit.
+    // beta: Box<dyn (Fn(u32) -> u32) + Send + Sync>,
     min_latency: Duration,
 }
 
@@ -52,21 +46,23 @@ impl Vegas {
 
     const DEFAULT_INCREASE_MIN_UTILISATION: f64 = 0.8;
 
-    pub fn with_initial_limit(initial_limit: u32) -> Self {
-        assert!(initial_limit > 0);
-
+    pub fn new() -> Self {
         Self {
-            initial_limit,
             min_limit: Self::DEFAULT_MIN_LIMIT,
             max_limit: Self::DEFAULT_MAX_LIMIT,
 
-            alpha: Box::new(|limit| 3 * limit.ilog10().max(1)),
-            beta: Box::new(|limit| 6 * limit.ilog10().max(1)),
-
-            inner: Mutex::new(Inner {
-                min_latency: Duration::MAX,
-            }),
+            // alpha: Box::new(|limit| 3 * limit.ilog10().max(1)),
+            // beta: Box::new(|limit| 6 * limit.ilog10().max(1)),
+            min_latency: Duration::MAX,
         }
+    }
+
+    fn alpha(limit: u32) -> u32 {
+        3 * limit.ilog10().max(1)
+    }
+
+    fn beta(limit: u32) -> u32 {
+        6 * limit.ilog10().max(1)
     }
 
     pub fn with_max_limit(self, max: u32) -> Self {
@@ -78,12 +74,14 @@ impl Vegas {
     }
 }
 
+impl Default for Vegas {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait]
 impl LimitAlgorithm for Vegas {
-    fn init_limit(&self) -> u32 {
-        self.initial_limit
-    }
-
     /// Vegas algorithm, generally applied once every RTT:
     ///
     /// ```text
@@ -126,21 +124,20 @@ impl LimitAlgorithm for Vegas {
     ///   1x => queue_size = 10 * (1 - 0.01 / 0.01)  =   0 (0%)
     /// 0.5x => queue_size = 10 * (1 - 0.01 / 0.005) = -10 (0%)
     /// ```
-    async fn update(&self, old_limit: u32, sample: Sample) -> u32 {
+    async fn update(mut self, old_limit: u32, sample: Sample) -> (Self, u32) {
         if sample.latency < MIN_SAMPLE_LATENCY {
-            return old_limit;
+            return (self, old_limit);
         }
 
-        let mut inner = self.inner.lock().await;
-        if sample.latency < inner.min_latency {
-            inner.min_latency = sample.latency;
-            return old_limit;
+        if sample.latency < self.min_latency {
+            self.min_latency = sample.latency;
+            return (self, old_limit);
         }
 
         // TODO: periodically reset min. latency measurement.
 
         let dt = sample.latency.as_secs_f64();
-        let min_d = inner.min_latency.as_secs_f64();
+        let min_d = self.min_latency.as_secs_f64();
 
         let estimated_queued_jobs = (old_limit as f64 * (1.0 - (min_d / dt))).ceil() as u32;
 
@@ -150,11 +147,11 @@ impl LimitAlgorithm for Vegas {
 
         let limit =
             // Limit too big
-            if sample.outcome == Outcome::Overload || estimated_queued_jobs < (self.alpha)(old_limit) {
+            if sample.outcome == Outcome::Overload || estimated_queued_jobs < Self::alpha(old_limit) {
                 old_limit - increment
 
             // Limit too small
-            } else if estimated_queued_jobs > (self.beta)(old_limit)
+            } else if estimated_queued_jobs > Self::beta(old_limit)
                 && utilisation > Self::DEFAULT_INCREASE_MIN_UTILISATION
             {
                 // TODO: support some kind of fast start, e.g. increase by beta when almost no queueing
@@ -165,6 +162,7 @@ impl LimitAlgorithm for Vegas {
                 old_limit
             };
 
-        limit.clamp(self.min_limit, self.max_limit)
+        let new = limit.clamp(self.min_limit, self.max_limit);
+        (self, new)
     }
 }

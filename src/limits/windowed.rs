@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use tokio::{sync::Mutex, time::Instant};
+use tokio::time::Instant;
 
 use crate::aggregators::Aggregator;
 
@@ -13,6 +13,7 @@ use super::{defaults::MIN_SAMPLE_LATENCY, LimitAlgorithm, Sample};
 /// The window duration is dynamic, based on the latency of the previous aggregated sample.
 ///
 /// Various [aggregators](crate::aggregators) are available to aggregate samples.
+#[derive(Clone, Copy)]
 pub struct Windowed<L, S> {
     min_window: Duration,
     max_window: Duration,
@@ -21,9 +22,10 @@ pub struct Windowed<L, S> {
 
     inner: L,
 
-    window: Mutex<Window<S>>,
+    window: Window<S>,
 }
 
+#[derive(Clone, Copy)]
 struct Window<S> {
     aggregator: S,
 
@@ -42,11 +44,11 @@ impl<L: LimitAlgorithm, S: Aggregator> Windowed<L, S> {
 
             inner,
 
-            window: Mutex::new(Window {
+            window: Window {
                 aggregator: sampler,
                 duration: min_window,
                 start: Instant::now(),
-            }),
+            },
         }
     }
 
@@ -76,35 +78,31 @@ impl<L: LimitAlgorithm, S: Aggregator> Windowed<L, S> {
 #[async_trait]
 impl<L, S> LimitAlgorithm for Windowed<L, S>
 where
-    L: LimitAlgorithm + Send + Sync,
-    S: Aggregator + Send + Sync,
+    L: LimitAlgorithm + Send + Sync + Clone,
+    S: Aggregator + Send + Sync + Clone,
 {
-    fn init_limit(&self) -> u32 {
-        self.inner.init_limit()
-    }
-
-    async fn update(&self, old_limit: u32, sample: Sample) -> u32 {
+    async fn update(mut self, old_limit: u32, sample: Sample) -> (Self, u32) {
         if sample.latency < self.min_latency {
-            return old_limit;
+            return (self, old_limit);
         }
 
-        let mut window = self.window.lock().await;
+        let agg_sample = self.window.aggregator.sample(sample);
 
-        let agg_sample = window.aggregator.sample(sample);
-
-        if window.aggregator.sample_size() >= self.min_samples
-            && window.start.elapsed() >= window.duration
+        if self.window.aggregator.sample_size() >= self.min_samples
+            && self.window.start.elapsed() >= self.window.duration
         {
-            window.aggregator.reset();
+            self.window.aggregator.reset();
 
-            window.start = Instant::now();
+            self.window.start = Instant::now();
 
             // TODO: the Netflix lib uses 2x min latency, make this configurable?
-            window.duration = agg_sample.latency.clamp(self.min_window, self.max_window);
+            self.window.duration = agg_sample.latency.clamp(self.min_window, self.max_window);
 
-            self.inner.update(old_limit, agg_sample).await
+            let (inner, limit) = self.inner.update(old_limit, agg_sample).await;
+            self.inner = inner;
+            (self, limit)
         } else {
-            old_limit
+            (self, old_limit)
         }
     }
 }
@@ -120,15 +118,15 @@ mod tests {
         let samples = 2;
 
         // Just test with a min sample size for now
-        let windowed_vegas = Windowed::new(Vegas::with_initial_limit(10), Average::default())
+        let mut windowed_vegas = Windowed::new(Vegas::new(), Average::default())
             .with_min_samples(samples)
             .with_min_window(Duration::ZERO)
             .with_max_window(Duration::ZERO);
 
-        let mut limit = windowed_vegas.init_limit();
+        let mut limit = 10;
 
         for _ in 0..samples {
-            limit = windowed_vegas
+            (windowed_vegas, limit) = windowed_vegas
                 .update(
                     limit,
                     Sample {
@@ -142,7 +140,7 @@ mod tests {
         assert_eq!(limit, 10, "first window shouldn't change limit for Vegas");
 
         for _ in 0..samples {
-            limit = windowed_vegas
+            (windowed_vegas, limit) = windowed_vegas
                 .update(
                     limit,
                     Sample {

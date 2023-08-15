@@ -1,5 +1,4 @@
 use async_trait::async_trait;
-use tokio::sync::Mutex;
 
 use crate::{
     limits::Sample,
@@ -18,18 +17,13 @@ use super::{defaults::MIN_SAMPLE_LATENCY, LimitAlgorithm};
 /// Inspired by TCP congestion control algorithms using delay gradients.
 ///
 /// - [Revisiting TCP Congestion Control Using Delay Gradients](https://hal.science/hal-01597987/)
+#[derive(Clone)]
 pub struct Gradient {
     min_limit: u32,
     max_limit: u32,
 
-    initial_limit: u32,
-    inner: Mutex<Inner>,
-}
-
-struct Inner {
     long_window_latency: ExpSmoothed,
     short_window_latency: Simple,
-
     limit: f64,
 }
 
@@ -47,20 +41,14 @@ impl Gradient {
     const DEFAULT_TOLERANCE: f64 = 2.;
     const DEFAULT_SMOOTHING: f64 = 0.2;
 
-    pub fn with_initial_limit(initial_limit: u32) -> Self {
-        assert!(initial_limit > 0);
-
+    pub fn new() -> Self {
         Self {
             min_limit: Self::DEFAULT_MIN_LIMIT,
             max_limit: Self::DEFAULT_MAX_LIMIT,
 
-            initial_limit,
-            inner: Mutex::new(Inner {
-                long_window_latency: ExpSmoothed::window_size(Self::DEFAULT_LONG_WINDOW_SAMPLES),
-                short_window_latency: Simple::window_size(Self::DEFAULT_SHORT_WINDOW_SAMPLES),
-
-                limit: initial_limit as f64,
-            }),
+            long_window_latency: ExpSmoothed::window_size(Self::DEFAULT_LONG_WINDOW_SAMPLES),
+            short_window_latency: Simple::window_size(Self::DEFAULT_SHORT_WINDOW_SAMPLES),
+            limit: 0.0,
         }
     }
 
@@ -73,34 +61,38 @@ impl Gradient {
     }
 }
 
+impl Default for Gradient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait]
 impl LimitAlgorithm for Gradient {
-    fn init_limit(&self) -> u32 {
-        self.initial_limit
-    }
-
-    async fn update(&self, old_limit: u32, sample: Sample) -> u32 {
+    async fn update(mut self, old_limit: u32, sample: Sample) -> (Self, u32) {
         // FIXME: Improve or justify safety of numerical conversions
         if sample.latency < MIN_SAMPLE_LATENCY {
-            return old_limit;
+            return (self, old_limit);
         }
 
-        let mut inner = self.inner.lock().await;
-
         // Update short window
-        let short = inner.short_window_latency.sample(sample.latency);
+        let short = self.short_window_latency.sample(sample.latency);
 
         // Update long window
-        let long = inner.long_window_latency.sample(sample.latency);
+        let long = self.long_window_latency.sample(sample.latency);
 
         let long_short_ratio = long.as_secs_f64() / short.as_secs_f64();
 
         // Speed up return to baseline after long period of increased load.
         if long_short_ratio > 2.0 {
-            inner.long_window_latency.set(long.mul_f64(0.95));
+            self.long_window_latency.set(long.mul_f64(0.95));
         }
 
-        let old_limit = inner.limit;
+        let old_limit = if self.limit == 0.0 {
+            old_limit as f64
+        } else {
+            self.limit
+        };
 
         // Only apply downwards gradient (when latency has increased).
         // Limit to >= 0.5 to prevent aggressive load shedding.
@@ -126,8 +118,8 @@ impl LimitAlgorithm for Gradient {
 
         new_limit = (new_limit).clamp(self.min_limit as f64, self.max_limit as f64);
 
-        inner.limit = new_limit;
-        new_limit as u32
+        self.limit = new_limit;
+        (self, new_limit as u32)
     }
 }
 
@@ -142,9 +134,9 @@ mod tests {
     #[tokio::test]
     async fn it_works() {
         static INIT_LIMIT: u32 = 10;
-        let gradient = Gradient::with_initial_limit(INIT_LIMIT);
+        let gradient = Gradient::new();
 
-        let limiter = Limiter::new(gradient);
+        let limiter = Limiter::new(gradient, INIT_LIMIT);
 
         /*
          * Concurrency = 10

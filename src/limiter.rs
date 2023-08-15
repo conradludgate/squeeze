@@ -24,7 +24,7 @@ use crate::limits::{LimitAlgorithm, Sample};
 /// caused by overload (loss).
 #[derive(Debug)]
 pub struct Limiter<T> {
-    limit_algo: T,
+    limit_algo: Mutex<T>,
     inner: LimiterInner,
 }
 
@@ -82,14 +82,13 @@ where
     T: LimitAlgorithm,
 {
     /// Create a limiter with a given limit control algorithm.
-    pub fn new(limit_algo: T) -> Self {
-        let initial_permits = limit_algo.init_limit();
-        assert!(initial_permits > 0);
+    pub fn new(limit_algo: T, initial_limit: u32) -> Self {
+        assert!(initial_limit > 0);
         Self {
-            limit_algo,
+            limit_algo: Mutex::new(limit_algo),
             inner: LimiterInner {
                 semaphore2: Mutex::new(PinList::new(pin_list::id::Checked::new())),
-                limits: AtomicU64::new((initial_permits as u64) << 32),
+                limits: AtomicU64::new((initial_limit as u64) << 32),
 
                 #[cfg(test)]
                 notifier: None,
@@ -157,32 +156,33 @@ where
     pub async fn release(&self, token: Token<'_>, outcome: Option<Outcome>) {
         let (new_limit, old_limit) = if let Some(outcome) = outcome {
             let mut state = self.inner.limits.load(Ordering::Acquire);
-            let old_limit = (state >> 32) as u32;
-            let in_flight = state as u32;
-
-            let sample = Sample {
-                latency: token.start.elapsed(),
-                in_flight,
-                outcome,
-            };
-
-            let new_limit = self.limit_algo.update(old_limit, sample).await;
 
             loop {
+                let old_limit = (state >> 32) as u32;
+                let in_flight = state as u32;
+
+                let sample = Sample {
+                    latency: token.start.elapsed(),
+                    in_flight,
+                    outcome,
+                };
+
+                let alg = self.limit_algo.lock().unwrap().clone();
+                let (alg, new_limit) = alg.update(old_limit, sample).await;
+
                 match self.inner.limits.compare_exchange(
                     state,
                     (new_limit as u64) << 32 | (state & 0xffffffff),
                     Ordering::AcqRel,
                     Ordering::Acquire,
                 ) {
-                    Ok(_) => break,
+                    Ok(_) => {
+                        *self.limit_algo.lock().unwrap() = alg;
+                        break (new_limit, old_limit);
+                    }
                     Err(s) => state = s,
                 }
             }
-
-            let old_limit = (state >> 32) as u32;
-
-            (new_limit, old_limit)
         } else {
             (0, 0)
         };
@@ -356,7 +356,7 @@ mod tests {
 
     #[tokio::test]
     async fn it_works() {
-        let limiter = Limiter::new(Fixed::new(10));
+        let limiter = Limiter::new(Fixed, 10);
 
         let token = limiter.try_acquire().unwrap();
 

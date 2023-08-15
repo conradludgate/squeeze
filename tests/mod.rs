@@ -26,19 +26,18 @@ struct Simulation {
 
 type Id = u32;
 
+#[derive(Clone)]
 enum LimitWrapper {
     Aimd(Aimd),
 }
 #[async_trait]
 impl LimitAlgorithm for LimitWrapper {
-    fn init_limit(&self) -> u32 {
+    async fn update(self, old_limit: u32, reading: Sample) -> (Self, u32) {
         match self {
-            LimitWrapper::Aimd(l) => l.init_limit(),
-        }
-    }
-    async fn update(&self, old_limit: u32, reading: Sample) -> u32 {
-        match self {
-            LimitWrapper::Aimd(l) => l.update(old_limit, reading).await,
+            LimitWrapper::Aimd(l) => {
+                let (l, new_limit) = l.update(old_limit, reading).await;
+                (LimitWrapper::Aimd(l), new_limit)
+            }
         }
     }
 }
@@ -535,12 +534,15 @@ async fn test() {
     let simulation_duration = Duration::from_secs(1);
 
     let client = Client::with_rps(
-        Some(Limiter::new(LimitWrapper::Aimd(
-            Aimd::with_initial_limit(10)
-                .with_max_limit(20)
-                .decrease_factor(0.9)
-                .increase_by(1),
-        ))),
+        Some(Limiter::new(
+            LimitWrapper::Aimd(
+                Aimd::new()
+                    .with_max_limit(20)
+                    .decrease_factor(0.9)
+                    .increase_by(1),
+            ),
+            10,
+        )),
         100.0,
     );
 

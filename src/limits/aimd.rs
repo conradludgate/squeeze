@@ -13,14 +13,13 @@ use super::LimitAlgorithm;
 /// 2. the utilisation of the current limit is high.
 ///
 /// Reduces available concurrency by a factor when load-based errors are detected.
+#[derive(Copy, Clone)]
 pub struct Aimd {
     min_limit: u32,
     max_limit: u32,
     decrease_factor: f32,
     increase_by: u32,
     min_utilisation_threshold: f64,
-
-    initial_limit: u32,
 }
 
 impl Aimd {
@@ -30,17 +29,13 @@ impl Aimd {
     const DEFAULT_MAX_LIMIT: u32 = 1000;
     const DEFAULT_INCREASE_MIN_UTILISATION: f64 = 0.8;
 
-    pub fn with_initial_limit(initial_limit: u32) -> Self {
-        assert!(initial_limit > 0);
-
+    pub fn new() -> Self {
         Self {
             min_limit: Self::DEFAULT_MIN_LIMIT,
             max_limit: Self::DEFAULT_MAX_LIMIT,
             decrease_factor: Self::DEFAULT_DECREASE_FACTOR,
             increase_by: Self::DEFAULT_INCREASE,
             min_utilisation_threshold: Self::DEFAULT_INCREASE_MIN_UTILISATION,
-
-            initial_limit,
         }
     }
 
@@ -78,15 +73,17 @@ impl Aimd {
     }
 }
 
+impl Default for Aimd {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait]
 impl LimitAlgorithm for Aimd {
-    fn init_limit(&self) -> u32 {
-        self.initial_limit
-    }
-
-    async fn update(&self, old_limit: u32, sample: Sample) -> u32 {
+    async fn update(self, old_limit: u32, sample: Sample) -> (Self, u32) {
         use Outcome::*;
-        match sample.outcome {
+        let new_limit = match sample.outcome {
             Success => {
                 let utilisation = sample.in_flight as f64 / old_limit as f64;
 
@@ -106,7 +103,8 @@ impl LimitAlgorithm for Aimd {
 
                 limit.clamp(self.min_limit, self.max_limit)
             }
-        }
+        };
+        (self, new_limit)
     }
 }
 
@@ -122,13 +120,11 @@ mod tests {
 
     #[tokio::test]
     async fn should_decrease_limit_on_overload() {
-        let aimd = Aimd::with_initial_limit(10)
-            .decrease_factor(0.5)
-            .increase_by(1);
+        let aimd = Aimd::new().decrease_factor(0.5).increase_by(1);
 
         let release_notifier = Arc::new(Notify::new());
 
-        let limiter = Limiter::new(aimd).with_release_notifier(release_notifier.clone());
+        let limiter = Limiter::new(aimd, 10).with_release_notifier(release_notifier.clone());
 
         let token = limiter.try_acquire().unwrap();
         limiter.release(token, Some(Outcome::Overload)).await;
@@ -138,12 +134,12 @@ mod tests {
 
     #[tokio::test]
     async fn should_increase_limit_on_success_when_using_gt_util_threshold() {
-        let aimd = Aimd::with_initial_limit(4)
+        let aimd = Aimd::new()
             .decrease_factor(0.5)
             .increase_by(1)
             .with_min_utilisation_threshold(0.5);
 
-        let limiter = Limiter::new(aimd);
+        let limiter = Limiter::new(aimd, 4);
 
         let token = limiter.try_acquire().unwrap();
         let _token = limiter.try_acquire().unwrap();
@@ -155,12 +151,12 @@ mod tests {
 
     #[tokio::test]
     async fn should_not_change_limit_on_success_when_using_lt_util_threshold() {
-        let aimd = Aimd::with_initial_limit(4)
+        let aimd = Aimd::new()
             .decrease_factor(0.5)
             .increase_by(1)
             .with_min_utilisation_threshold(0.5);
 
-        let limiter = Limiter::new(aimd);
+        let limiter = Limiter::new(aimd, 4);
 
         let token = limiter.try_acquire().unwrap();
 
@@ -174,11 +170,9 @@ mod tests {
 
     #[tokio::test]
     async fn should_not_change_limit_when_no_outcome() {
-        let aimd = Aimd::with_initial_limit(10)
-            .decrease_factor(0.5)
-            .increase_by(1);
+        let aimd = Aimd::new().decrease_factor(0.5).increase_by(1);
 
-        let limiter = Limiter::new(aimd);
+        let limiter = Limiter::new(aimd, 10);
 
         let token = limiter.try_acquire().unwrap();
         limiter.release(token, None).await;
