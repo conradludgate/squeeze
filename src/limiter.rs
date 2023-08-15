@@ -8,7 +8,7 @@ use std::{
 };
 
 use tokio::{
-    sync::{Semaphore, SemaphorePermit, TryAcquireError},
+    sync::{Semaphore, TryAcquireError},
     time::{timeout, Instant},
 };
 
@@ -24,11 +24,16 @@ use crate::limits::{LimitAlgorithm, Sample};
 #[derive(Debug)]
 pub struct Limiter<T> {
     limit_algo: T,
+    inner: LimiterInner,
+}
+
+#[derive(Debug)]
+struct LimiterInner {
     semaphore: Arc<Semaphore>,
     limit: AtomicUsize,
 
     /// Best-effort
-    in_flight: Arc<AtomicUsize>,
+    in_flight: AtomicUsize,
 
     #[cfg(test)]
     notifier: Option<Arc<tokio::sync::Notify>>,
@@ -39,9 +44,8 @@ pub struct Limiter<T> {
 /// Release the token back to the [Limiter] after the job is complete.
 #[derive(Debug)]
 pub struct Token<'t> {
-    _permit: SemaphorePermit<'t>,
+    limiter: &'t LimiterInner,
     start: Instant,
-    in_flight: Arc<AtomicUsize>,
 }
 
 /// A snapshot of the state of the [Limiter].
@@ -76,19 +80,21 @@ where
         assert!(initial_permits > 0);
         Self {
             limit_algo,
-            semaphore: Arc::new(Semaphore::new(initial_permits)),
-            limit: AtomicUsize::new(initial_permits),
-            in_flight: Arc::new(AtomicUsize::new(0)),
+            inner: LimiterInner {
+                semaphore: Arc::new(Semaphore::new(initial_permits)),
+                limit: AtomicUsize::new(initial_permits),
+                in_flight: AtomicUsize::new(0),
 
-            #[cfg(test)]
-            notifier: None,
+                #[cfg(test)]
+                notifier: None,
+            },
         }
     }
 
     /// In some cases [Token]s are acquired asynchronously when updating the limit.
     #[cfg(test)]
     pub fn with_release_notifier(mut self, n: Arc<tokio::sync::Notify>) -> Self {
-        self.notifier = Some(n);
+        self.inner.notifier = Some(n);
         self
     }
 
@@ -96,10 +102,11 @@ where
     ///
     /// Returns `None` if there are none available.
     pub fn try_acquire(&self) -> Option<Token<'_>> {
-        match self.semaphore.try_acquire() {
+        match self.inner.semaphore.try_acquire() {
             Ok(permit) => {
-                self.in_flight.fetch_add(1, Ordering::AcqRel);
-                Some(Token::new(permit, self.in_flight.clone()))
+                permit.forget();
+                self.inner.in_flight.fetch_add(1, Ordering::AcqRel);
+                Some(Token::new(&self.inner))
             }
             Err(TryAcquireError::NoPermits) => None,
             Err(TryAcquireError::Closed) => {
@@ -112,8 +119,11 @@ where
     ///
     /// Returns `None` if there are none available after `duration`.
     pub async fn acquire_timeout(&self, duration: Duration) -> Option<Token<'_>> {
-        match timeout(duration, self.semaphore.acquire()).await {
-            Ok(Ok(permit)) => Some(Token::new(permit, self.in_flight.clone())),
+        match timeout(duration, self.inner.semaphore.acquire()).await {
+            Ok(Ok(permit)) => {
+                permit.forget();
+                Some(Token::new(&self.inner))
+            }
             Err(_) => None,
 
             Ok(Err(_)) => {
@@ -138,21 +148,21 @@ where
 
             let new_limit = self.limit_algo.update(sample).await;
 
-            let old_limit = self.limit.swap(new_limit, Ordering::SeqCst);
+            let old_limit = self.inner.limit.swap(new_limit, Ordering::SeqCst);
 
             match new_limit.cmp(&old_limit) {
                 cmp::Ordering::Greater => {
-                    self.semaphore.add_permits(new_limit - old_limit);
+                    self.inner.semaphore.add_permits(new_limit - old_limit);
 
                     #[cfg(test)]
-                    if let Some(n) = &self.notifier {
+                    if let Some(n) = &self.inner.notifier {
                         n.notify_one();
                     }
                 }
                 cmp::Ordering::Less => {
-                    let semaphore = self.semaphore.clone();
+                    let semaphore = self.inner.semaphore.clone();
                     #[cfg(test)]
-                    let notifier = self.notifier.clone();
+                    let notifier = self.inner.notifier.clone();
 
                     tokio::spawn(async move {
                         // If there aren't enough permits available then this will wait until enough
@@ -174,7 +184,7 @@ where
                 _ =>
                 {
                     #[cfg(test)]
-                    if let Some(n) = &self.notifier {
+                    if let Some(n) = &self.inner.notifier {
                         n.notify_one();
                     }
                 }
@@ -185,15 +195,15 @@ where
     }
 
     pub(crate) fn available(&self) -> usize {
-        self.semaphore.available_permits()
+        self.inner.semaphore.available_permits()
     }
 
     pub(crate) fn limit(&self) -> usize {
-        self.limit.load(Ordering::Acquire)
+        self.inner.limit.load(Ordering::Acquire)
     }
 
     pub(crate) fn in_flight(&self) -> usize {
-        self.in_flight.load(Ordering::Acquire)
+        self.inner.in_flight.load(Ordering::Acquire)
     }
 
     /// The current state of the limiter.
@@ -207,11 +217,10 @@ where
 }
 
 impl<'t> Token<'t> {
-    fn new(permit: SemaphorePermit<'t>, in_flight: Arc<AtomicUsize>) -> Self {
+    fn new(limiter: &'t LimiterInner) -> Self {
         Self {
-            _permit: permit,
+            limiter,
             start: Instant::now(),
-            in_flight,
         }
     }
 
@@ -226,7 +235,8 @@ impl<'t> Token<'t> {
 impl Drop for Token<'_> {
     /// Reduces the number of jobs in flight.
     fn drop(&mut self) {
-        self.in_flight.fetch_sub(1, Ordering::AcqRel);
+        self.limiter.semaphore.add_permits(1);
+        self.limiter.in_flight.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
