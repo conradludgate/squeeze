@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use async_trait::async_trait;
 
@@ -16,23 +16,23 @@ use super::LimitAlgorithm;
 ///
 /// Reduces available concurrency by a factor when load-based errors are detected.
 pub struct Aimd {
-    min_limit: usize,
-    max_limit: usize,
+    min_limit: u32,
+    max_limit: u32,
     decrease_factor: f32,
-    increase_by: usize,
+    increase_by: u32,
     min_utilisation_threshold: f64,
 
-    limit: AtomicUsize,
+    limit: AtomicU32,
 }
 
 impl Aimd {
     const DEFAULT_DECREASE_FACTOR: f32 = 0.9;
-    const DEFAULT_INCREASE: usize = 1;
-    const DEFAULT_MIN_LIMIT: usize = 1;
-    const DEFAULT_MAX_LIMIT: usize = 1000;
+    const DEFAULT_INCREASE: u32 = 1;
+    const DEFAULT_MIN_LIMIT: u32 = 1;
+    const DEFAULT_MAX_LIMIT: u32 = 1000;
     const DEFAULT_INCREASE_MIN_UTILISATION: f64 = 0.8;
 
-    pub fn with_initial_limit(initial_limit: usize) -> Self {
+    pub fn with_initial_limit(initial_limit: u32) -> Self {
         assert!(initial_limit > 0);
 
         Self {
@@ -42,7 +42,7 @@ impl Aimd {
             increase_by: Self::DEFAULT_INCREASE,
             min_utilisation_threshold: Self::DEFAULT_INCREASE_MIN_UTILISATION,
 
-            limit: AtomicUsize::new(initial_limit),
+            limit: AtomicU32::new(initial_limit),
         }
     }
 
@@ -54,7 +54,7 @@ impl Aimd {
         }
     }
 
-    pub fn increase_by(self, increase: usize) -> Self {
+    pub fn increase_by(self, increase: u32) -> Self {
         assert!(increase > 0);
         Self {
             increase_by: increase,
@@ -62,7 +62,7 @@ impl Aimd {
         }
     }
 
-    pub fn with_max_limit(self, max: usize) -> Self {
+    pub fn with_max_limit(self, max: u32) -> Self {
         assert!(max > 0);
         Self {
             max_limit: max,
@@ -82,11 +82,11 @@ impl Aimd {
 
 #[async_trait]
 impl LimitAlgorithm for Aimd {
-    fn limit(&self) -> usize {
+    fn limit(&self) -> u32 {
         self.limit.load(Ordering::Acquire)
     }
 
-    async fn update(&self, sample: Sample) -> usize {
+    async fn update(&self, sample: Sample) -> u32 {
         use Outcome::*;
         match sample.outcome {
             Success => {
@@ -110,7 +110,7 @@ impl LimitAlgorithm for Aimd {
 
                         // Floor instead of round, so the limit reduces even with small numbers.
                         // E.g. round(2 * 0.9) = 2, but floor(2 * 0.9) = 1
-                        let limit = limit.floor() as usize;
+                        let limit = limit.floor() as u32;
 
                         Some(limit.clamp(self.min_limit, self.max_limit))
                     })
@@ -144,7 +144,7 @@ mod tests {
         let token = limiter.try_acquire().unwrap();
         limiter.release(token, Some(Outcome::Overload)).await;
         release_notifier.notified().await;
-        assert_eq!(limiter.limit(), 5, "overload: decrease");
+        assert_eq!(limiter.state().limit(), 5, "overload: decrease");
     }
 
     #[tokio::test]
@@ -161,7 +161,7 @@ mod tests {
         let _token = limiter.try_acquire().unwrap();
 
         limiter.release(token, Some(Outcome::Success)).await;
-        assert_eq!(limiter.limit(), 5, "success: increase");
+        assert_eq!(limiter.state().limit(), 5, "success: increase");
     }
 
     #[tokio::test]
@@ -176,7 +176,11 @@ mod tests {
         let token = limiter.try_acquire().unwrap();
 
         limiter.release(token, Some(Outcome::Success)).await;
-        assert_eq!(limiter.limit(), 4, "success: ignore when < half limit");
+        assert_eq!(
+            limiter.state().limit(),
+            4,
+            "success: ignore when < half limit"
+        );
     }
 
     #[tokio::test]
@@ -189,6 +193,6 @@ mod tests {
 
         let token = limiter.try_acquire().unwrap();
         limiter.release(token, None).await;
-        assert_eq!(limiter.limit(), 10, "ignore");
+        assert_eq!(limiter.state().limit(), 10, "ignore");
     }
 }

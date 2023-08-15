@@ -79,11 +79,11 @@ where
     L: LimitAlgorithm + Send + Sync,
     S: Aggregator + Send + Sync,
 {
-    fn limit(&self) -> usize {
+    fn limit(&self) -> u32 {
         self.inner.limit()
     }
 
-    async fn update(&self, sample: Sample) -> usize {
+    async fn update(&self, sample: Sample) -> u32 {
         if sample.latency < self.min_latency {
             return self.inner.limit();
         }

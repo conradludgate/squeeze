@@ -1,5 +1,5 @@
 use std::{
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::atomic::{AtomicU32, Ordering},
     time::Duration,
 };
 
@@ -33,15 +33,15 @@ use super::{defaults::MIN_SAMPLE_LATENCY, LimitAlgorithm, Sample};
 /// - [Understanding TCP Vegas: Theory and
 /// Practice](https://www.cs.princeton.edu/research/techreps/TR-628-00)
 pub struct Vegas {
-    min_limit: usize,
-    max_limit: usize,
+    min_limit: u32,
+    max_limit: u32,
 
     /// Lower queueing threshold, as a function of the current limit.
-    alpha: Box<dyn (Fn(usize) -> usize) + Send + Sync>,
+    alpha: Box<dyn (Fn(u32) -> u32) + Send + Sync>,
     /// Upper queueing threshold, as a function of the current limit.
-    beta: Box<dyn (Fn(usize) -> usize) + Send + Sync>,
+    beta: Box<dyn (Fn(u32) -> u32) + Send + Sync>,
 
-    limit: AtomicUsize,
+    limit: AtomicU32,
     inner: Mutex<Inner>,
 }
 
@@ -50,21 +50,21 @@ struct Inner {
 }
 
 impl Vegas {
-    const DEFAULT_MIN_LIMIT: usize = 1;
-    const DEFAULT_MAX_LIMIT: usize = 1000;
+    const DEFAULT_MIN_LIMIT: u32 = 1;
+    const DEFAULT_MAX_LIMIT: u32 = 1000;
 
     const DEFAULT_INCREASE_MIN_UTILISATION: f64 = 0.8;
 
-    pub fn with_initial_limit(initial_limit: usize) -> Self {
+    pub fn with_initial_limit(initial_limit: u32) -> Self {
         assert!(initial_limit > 0);
 
         Self {
-            limit: AtomicUsize::new(initial_limit),
+            limit: AtomicU32::new(initial_limit),
             min_limit: Self::DEFAULT_MIN_LIMIT,
             max_limit: Self::DEFAULT_MAX_LIMIT,
 
-            alpha: Box::new(|limit| 3 * limit.ilog10().max(1) as usize),
-            beta: Box::new(|limit| 6 * limit.ilog10().max(1) as usize),
+            alpha: Box::new(|limit| 3 * limit.ilog10().max(1)),
+            beta: Box::new(|limit| 6 * limit.ilog10().max(1)),
 
             inner: Mutex::new(Inner {
                 min_latency: Duration::MAX,
@@ -72,7 +72,7 @@ impl Vegas {
         }
     }
 
-    pub fn with_max_limit(self, max: usize) -> Self {
+    pub fn with_max_limit(self, max: u32) -> Self {
         assert!(max > 0);
         Self {
             max_limit: max,
@@ -83,7 +83,7 @@ impl Vegas {
 
 #[async_trait]
 impl LimitAlgorithm for Vegas {
-    fn limit(&self) -> usize {
+    fn limit(&self) -> u32 {
         self.limit.load(Ordering::Acquire)
     }
 
@@ -129,7 +129,7 @@ impl LimitAlgorithm for Vegas {
     ///   1x => queue_size = 10 * (1 - 0.01 / 0.01)  =   0 (0%)
     /// 0.5x => queue_size = 10 * (1 - 0.01 / 0.005) = -10 (0%)
     /// ```
-    async fn update(&self, sample: Sample) -> usize {
+    async fn update(&self, sample: Sample) -> u32 {
         if sample.latency < MIN_SAMPLE_LATENCY {
             return self.limit.load(Ordering::Acquire);
         }
@@ -140,17 +140,17 @@ impl LimitAlgorithm for Vegas {
             return self.limit.load(Ordering::Acquire);
         }
 
-        let update_limit = |limit: usize| {
+        let update_limit = |limit: u32| {
             // TODO: periodically reset min. latency measurement.
 
             let dt = sample.latency.as_secs_f64();
             let min_d = inner.min_latency.as_secs_f64();
 
-            let estimated_queued_jobs = (limit as f64 * (1.0 - (min_d / dt))).ceil() as usize;
+            let estimated_queued_jobs = (limit as f64 * (1.0 - (min_d / dt))).ceil() as u32;
 
             let utilisation = sample.in_flight as f64 / limit as f64;
 
-            let increment = limit.ilog10().max(1) as usize;
+            let increment = limit.ilog10().max(1);
 
             let limit =
                 // Limit too big

@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use async_trait::async_trait;
 use tokio::sync::Mutex;
@@ -21,10 +21,10 @@ use super::{defaults::MIN_SAMPLE_LATENCY, LimitAlgorithm};
 ///
 /// - [Revisiting TCP Congestion Control Using Delay Gradients](https://hal.science/hal-01597987/)
 pub struct Gradient {
-    min_limit: usize,
-    max_limit: usize,
+    min_limit: u32,
+    max_limit: u32,
 
-    limit: AtomicUsize,
+    limit: AtomicU32,
     inner: Mutex<Inner>,
 }
 
@@ -36,8 +36,8 @@ struct Inner {
 }
 
 impl Gradient {
-    const DEFAULT_MIN_LIMIT: usize = 1;
-    const DEFAULT_MAX_LIMIT: usize = 1000;
+    const DEFAULT_MIN_LIMIT: u32 = 1;
+    const DEFAULT_MAX_LIMIT: u32 = 1000;
 
     const DEFAULT_INCREASE: f64 = 4.;
     const DEFAULT_INCREASE_MIN_UTILISATION: f64 = 0.8;
@@ -49,14 +49,14 @@ impl Gradient {
     const DEFAULT_TOLERANCE: f64 = 2.;
     const DEFAULT_SMOOTHING: f64 = 0.2;
 
-    pub fn with_initial_limit(initial_limit: usize) -> Self {
+    pub fn with_initial_limit(initial_limit: u32) -> Self {
         assert!(initial_limit > 0);
 
         Self {
             min_limit: Self::DEFAULT_MIN_LIMIT,
             max_limit: Self::DEFAULT_MAX_LIMIT,
 
-            limit: AtomicUsize::new(initial_limit),
+            limit: AtomicU32::new(initial_limit),
             inner: Mutex::new(Inner {
                 long_window_latency: ExpSmoothed::window_size(Self::DEFAULT_LONG_WINDOW_SAMPLES),
                 short_window_latency: Simple::window_size(Self::DEFAULT_SHORT_WINDOW_SAMPLES),
@@ -66,7 +66,7 @@ impl Gradient {
         }
     }
 
-    pub fn with_max_limit(self, max: usize) -> Self {
+    pub fn with_max_limit(self, max: u32) -> Self {
         assert!(max > 0);
         Self {
             max_limit: max,
@@ -77,11 +77,11 @@ impl Gradient {
 
 #[async_trait]
 impl LimitAlgorithm for Gradient {
-    fn limit(&self) -> usize {
+    fn limit(&self) -> u32 {
         self.limit.load(Ordering::Acquire)
     }
 
-    async fn update(&self, sample: Sample) -> usize {
+    async fn update(&self, sample: Sample) -> u32 {
         // FIXME: Improve or justify safety of numerical conversions
         if sample.latency < MIN_SAMPLE_LATENCY {
             return self.limit.load(Ordering::Acquire);
@@ -129,7 +129,7 @@ impl LimitAlgorithm for Gradient {
         new_limit = (new_limit).clamp(self.min_limit as f64, self.max_limit as f64);
 
         inner.limit = new_limit;
-        let rounded_limit = new_limit as usize;
+        let rounded_limit = new_limit as u32;
         self.limit.store(rounded_limit, Ordering::Release);
 
         rounded_limit
@@ -146,7 +146,7 @@ mod tests {
 
     #[tokio::test]
     async fn it_works() {
-        static INIT_LIMIT: usize = 10;
+        static INIT_LIMIT: u32 = 10;
         let gradient = Gradient::with_initial_limit(INIT_LIMIT);
 
         let limiter = Limiter::new(gradient);
@@ -164,7 +164,7 @@ mod tests {
             token.set_latency(Duration::from_millis(25));
             limiter.release(token, Some(Outcome::Success)).await;
         }
-        let higher_limit = limiter.limit();
+        let higher_limit = limiter.state().limit();
         assert!(
             higher_limit > INIT_LIMIT,
             "steady latency + high concurrency: increase limit"
@@ -184,7 +184,7 @@ mod tests {
             limiter.release(token, Some(Outcome::Success)).await;
         }
         assert!(
-            limiter.limit() < higher_limit,
+            limiter.state().limit() < higher_limit,
             "increased latency: decrease limit"
         );
     }

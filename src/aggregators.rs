@@ -17,7 +17,7 @@ pub trait Aggregator {
 /// Average latency.
 pub struct Average {
     latency_sum: Duration,
-    max_in_flight: usize,
+    max_in_flight: u32,
     overload: Outcome,
     samples: usize,
 }
@@ -25,7 +25,7 @@ pub struct Average {
 /// A latency percentile.
 pub struct Percentile {
     percentile: f64,
-    max_in_flight: usize,
+    max_in_flight: u32,
     overload: Outcome,
     latencies: Vec<Duration>,
 }
