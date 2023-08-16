@@ -30,8 +30,8 @@ use super::{defaults::MIN_SAMPLE_LATENCY, LimitAlgorithm, Sample};
 /// Practice](https://www.cs.princeton.edu/research/techreps/TR-628-00)
 #[derive(Clone)]
 pub struct Vegas {
-    min_limit: u32,
-    max_limit: u32,
+    min_limit: usize,
+    max_limit: usize,
 
     // /// Lower queueing threshold, as a function of the current limit.
     // alpha: Box<dyn (Fn(u32) -> u32) + Send + Sync>,
@@ -41,8 +41,8 @@ pub struct Vegas {
 }
 
 impl Vegas {
-    const DEFAULT_MIN_LIMIT: u32 = 1;
-    const DEFAULT_MAX_LIMIT: u32 = 1000;
+    const DEFAULT_MIN_LIMIT: usize = 1;
+    const DEFAULT_MAX_LIMIT: usize = 1000;
 
     const DEFAULT_INCREASE_MIN_UTILISATION: f64 = 0.8;
 
@@ -57,15 +57,15 @@ impl Vegas {
         }
     }
 
-    fn alpha(limit: u32) -> u32 {
+    fn alpha(limit: usize) -> u32 {
         3 * limit.ilog10().max(1)
     }
 
-    fn beta(limit: u32) -> u32 {
+    fn beta(limit: usize) -> u32 {
         6 * limit.ilog10().max(1)
     }
 
-    pub fn with_max_limit(self, max: u32) -> Self {
+    pub fn with_max_limit(self, max: usize) -> Self {
         assert!(max > 0);
         Self {
             max_limit: max,
@@ -124,14 +124,14 @@ impl LimitAlgorithm for Vegas {
     ///   1x => queue_size = 10 * (1 - 0.01 / 0.01)  =   0 (0%)
     /// 0.5x => queue_size = 10 * (1 - 0.01 / 0.005) = -10 (0%)
     /// ```
-    async fn update(mut self, old_limit: u32, sample: Sample) -> (Self, u32) {
+    async fn update(&mut self, old_limit: usize, sample: Sample) -> usize {
         if sample.latency < MIN_SAMPLE_LATENCY {
-            return (self, old_limit);
+            return old_limit;
         }
 
         if sample.latency < self.min_latency {
             self.min_latency = sample.latency;
-            return (self, old_limit);
+            return old_limit;
         }
 
         // TODO: periodically reset min. latency measurement.
@@ -143,7 +143,7 @@ impl LimitAlgorithm for Vegas {
 
         let utilisation = sample.in_flight as f64 / old_limit as f64;
 
-        let increment = old_limit.ilog10().max(1);
+        let increment = old_limit.ilog10().max(1) as usize;
 
         let limit =
             // Limit too big
@@ -162,7 +162,6 @@ impl LimitAlgorithm for Vegas {
                 old_limit
             };
 
-        let new = limit.clamp(self.min_limit, self.max_limit);
-        (self, new)
+        limit.clamp(self.min_limit, self.max_limit)
     }
 }

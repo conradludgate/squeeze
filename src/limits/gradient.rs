@@ -17,7 +17,6 @@ use super::{defaults::MIN_SAMPLE_LATENCY, LimitAlgorithm};
 /// Inspired by TCP congestion control algorithms using delay gradients.
 ///
 /// - [Revisiting TCP Congestion Control Using Delay Gradients](https://hal.science/hal-01597987/)
-#[derive(Clone)]
 pub struct Gradient {
     min_limit: u32,
     max_limit: u32,
@@ -69,10 +68,10 @@ impl Default for Gradient {
 
 #[async_trait]
 impl LimitAlgorithm for Gradient {
-    async fn update(mut self, old_limit: u32, sample: Sample) -> (Self, u32) {
+    async fn update(&mut self, old_limit: usize, sample: Sample) -> usize {
         // FIXME: Improve or justify safety of numerical conversions
         if sample.latency < MIN_SAMPLE_LATENCY {
-            return (self, old_limit);
+            return old_limit;
         }
 
         // Update short window
@@ -119,7 +118,7 @@ impl LimitAlgorithm for Gradient {
         new_limit = (new_limit).clamp(self.min_limit as f64, self.max_limit as f64);
 
         self.limit = new_limit;
-        (self, new_limit as u32)
+        new_limit as usize
     }
 }
 
@@ -133,7 +132,7 @@ mod tests {
 
     #[tokio::test]
     async fn it_works() {
-        static INIT_LIMIT: u32 = 10;
+        static INIT_LIMIT: usize = 10;
         let gradient = Gradient::new();
 
         let limiter = Limiter::new(gradient, INIT_LIMIT);

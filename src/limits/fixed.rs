@@ -8,7 +8,7 @@ pub struct Fixed;
 
 #[async_trait]
 impl LimitAlgorithm for Fixed {
-    async fn update(self, old_limit: u32, _reading: Sample) -> (Self, u32) {
-        (self, old_limit)
+    async fn update(&mut self, old_limit: usize, _reading: Sample) -> usize {
+        old_limit
     }
 }

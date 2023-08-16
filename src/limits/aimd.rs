@@ -1,3 +1,5 @@
+use std::usize;
+
 use async_trait::async_trait;
 
 use crate::{limits::Sample, Outcome};
@@ -13,20 +15,19 @@ use super::LimitAlgorithm;
 /// 2. the utilisation of the current limit is high.
 ///
 /// Reduces available concurrency by a factor when load-based errors are detected.
-#[derive(Copy, Clone)]
 pub struct Aimd {
-    min_limit: u32,
-    max_limit: u32,
+    min_limit: usize,
+    max_limit: usize,
     decrease_factor: f32,
-    increase_by: u32,
+    increase_by: usize,
     min_utilisation_threshold: f64,
 }
 
 impl Aimd {
     const DEFAULT_DECREASE_FACTOR: f32 = 0.9;
-    const DEFAULT_INCREASE: u32 = 1;
-    const DEFAULT_MIN_LIMIT: u32 = 1;
-    const DEFAULT_MAX_LIMIT: u32 = 1000;
+    const DEFAULT_INCREASE: usize = 1;
+    const DEFAULT_MIN_LIMIT: usize = 1;
+    const DEFAULT_MAX_LIMIT: usize = 1000;
     const DEFAULT_INCREASE_MIN_UTILISATION: f64 = 0.8;
 
     pub fn new() -> Self {
@@ -47,7 +48,7 @@ impl Aimd {
         }
     }
 
-    pub fn increase_by(self, increase: u32) -> Self {
+    pub fn increase_by(self, increase: usize) -> Self {
         assert!(increase > 0);
         Self {
             increase_by: increase,
@@ -55,7 +56,7 @@ impl Aimd {
         }
     }
 
-    pub fn with_max_limit(self, max: u32) -> Self {
+    pub fn with_max_limit(self, max: usize) -> Self {
         assert!(max > 0);
         Self {
             max_limit: max,
@@ -81,9 +82,9 @@ impl Default for Aimd {
 
 #[async_trait]
 impl LimitAlgorithm for Aimd {
-    async fn update(self, old_limit: u32, sample: Sample) -> (Self, u32) {
+    async fn update(&mut self, old_limit: usize, sample: Sample) -> usize {
         use Outcome::*;
-        let new_limit = match sample.outcome {
+        match sample.outcome {
             Success => {
                 let utilisation = sample.in_flight as f64 / old_limit as f64;
 
@@ -99,12 +100,11 @@ impl LimitAlgorithm for Aimd {
 
                 // Floor instead of round, so the limit reduces even with small numbers.
                 // E.g. round(2 * 0.9) = 2, but floor(2 * 0.9) = 1
-                let limit = limit.floor() as u32;
+                let limit = limit.floor() as usize;
 
                 limit.clamp(self.min_limit, self.max_limit)
             }
-        };
-        (self, new_limit)
+        }
     }
 }
 

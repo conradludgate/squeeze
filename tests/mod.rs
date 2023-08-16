@@ -26,18 +26,14 @@ struct Simulation {
 
 type Id = u32;
 
-#[derive(Clone)]
 enum LimitWrapper {
     Aimd(Aimd),
 }
 #[async_trait]
 impl LimitAlgorithm for LimitWrapper {
-    async fn update(self, old_limit: u32, reading: Sample) -> (Self, u32) {
+    async fn update(&mut self, old_limit: usize, reading: Sample) -> usize {
         match self {
-            LimitWrapper::Aimd(l) => {
-                let (l, new_limit) = l.update(old_limit, reading).await;
-                (LimitWrapper::Aimd(l), new_limit)
-            }
+            LimitWrapper::Aimd(l) => l.update(old_limit, reading).await,
         }
     }
 }
@@ -494,7 +490,7 @@ impl Summary {
     fn mean_latency(&self) -> Duration {
         self.requests.iter().map(|r| r.latency).sum::<Duration>() / self.total_requests() as u32
     }
-    fn max_concurrency(&self) -> u32 {
+    fn max_concurrency(&self) -> usize {
         self.event_log
             .iter()
             .map(|log| log.limit_state().map(|l| l.in_flight()).unwrap_or_default())

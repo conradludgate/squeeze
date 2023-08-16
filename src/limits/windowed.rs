@@ -81,9 +81,9 @@ where
     L: LimitAlgorithm + Send + Sync + Clone,
     S: Aggregator + Send + Sync + Clone,
 {
-    async fn update(mut self, old_limit: u32, sample: Sample) -> (Self, u32) {
+    async fn update(&mut self, old_limit: usize, sample: Sample) -> usize {
         if sample.latency < self.min_latency {
-            return (self, old_limit);
+            return old_limit;
         }
 
         let agg_sample = self.window.aggregator.sample(sample);
@@ -98,11 +98,9 @@ where
             // TODO: the Netflix lib uses 2x min latency, make this configurable?
             self.window.duration = agg_sample.latency.clamp(self.min_window, self.max_window);
 
-            let (inner, limit) = self.inner.update(old_limit, agg_sample).await;
-            self.inner = inner;
-            (self, limit)
+            self.inner.update(old_limit, agg_sample).await
         } else {
-            (self, old_limit)
+            old_limit
         }
     }
 }
@@ -126,7 +124,7 @@ mod tests {
         let mut limit = 10;
 
         for _ in 0..samples {
-            (windowed_vegas, limit) = windowed_vegas
+            limit = windowed_vegas
                 .update(
                     limit,
                     Sample {
@@ -140,7 +138,7 @@ mod tests {
         assert_eq!(limit, 10, "first window shouldn't change limit for Vegas");
 
         for _ in 0..samples {
-            (windowed_vegas, limit) = windowed_vegas
+            limit = windowed_vegas
                 .update(
                     limit,
                     Sample {

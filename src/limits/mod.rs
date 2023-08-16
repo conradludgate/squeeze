@@ -20,9 +20,9 @@ pub use windowed::Windowed;
 
 /// An algorithm for controlling a concurrency limit.
 #[async_trait]
-pub trait LimitAlgorithm: Clone {
+pub trait LimitAlgorithm {
     /// Update the concurrency limit in response to a new job completion.
-    async fn update(self, old_limit: u32, sample: Sample) -> (Self, u32);
+    async fn update(&mut self, old_limit: usize, sample: Sample) -> usize;
 }
 
 /// The result of a job (or jobs), including the [Outcome] (loss) and latency (delay).
@@ -30,6 +30,6 @@ pub trait LimitAlgorithm: Clone {
 pub struct Sample {
     pub(crate) latency: Duration,
     /// Jobs in flight when the sample was taken.
-    pub(crate) in_flight: u32,
+    pub(crate) in_flight: usize,
     pub(crate) outcome: Outcome,
 }
